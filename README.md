@@ -108,7 +108,7 @@ recruitiq/
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/your-username/recruitiq.git
+git clone https://github.com/NoobCoder-dweeb/recruitiq.git
 cd recruitiq
 ```
 
