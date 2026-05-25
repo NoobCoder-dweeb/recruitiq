@@ -187,7 +187,7 @@ You can adjust model settings in `core/scorer.py`:
 
 ```python
 llm = ChatGroq(
-    model="llama3-70b-8192",   # Switch to "llama3-8b-8192" for faster/lighter runs
+    model="llama-3.3-70b-versatile",   # Switch to "llama-3.1-8b-instant" for faster/lighter runs
     temperature=0.2,            # Low temp = consistent, structured output
     max_tokens=1024,
 )
