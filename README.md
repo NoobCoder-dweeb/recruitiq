@@ -69,11 +69,11 @@ No OpenAI credits. No infrastructure costs. Just fast, accurate screening.
 
 | Layer | Tool | Cost |
 | --- | --- | --- |
-| LLM | Llama 3 70B via Groq API | ✅ Free tier |
-| Orchestration | LangChain | ✅ Free / OSS |
-| UI | Streamlit | ✅ Free |
-| PDF Parsing | pdfplumber | ✅ Free / OSS |
-| Language | Python 3.10+ | ✅ Free |
+| LLM | Llama 3 70B via Groq API | Free tier |
+| Orchestration | LangChain | Free / OSS |
+| UI | Streamlit | Free |
+| PDF Parsing | pdfplumber | Free / OSS |
+| Language | Python 3.10+ | Free |
 
 > **Why Groq?** Groq's free tier serves `llama3-70b-8192` with extremely low latency (~300ms). No billing setup required for moderate usage. Rate limits apply — see [Groq's free tier limits](https://console.groq.com/docs/rate-limits).
 
@@ -177,7 +177,7 @@ pip install streamlit langchain langchain-groq pdfplumber python-dotenv
 
 | Variable | Description | Required |
 | --- | --- | --- |
-| `GROQ_API_KEY` | Your Groq API key for Llama 3 inference | ✅ Yes |
+| `GROQ_API_KEY` | Your Groq API key for Llama 3 inference | Yes |
 
 ---
 
@@ -231,7 +231,7 @@ Pull requests are welcome. For major changes, please open an issue first to disc
 4. Push to branch: `git push origin feature/your-feature`
 5. Open a Pull Request
 
-## 🙏 Acknowledgements
+## Acknowledgements
 
 - [Groq](https://groq.com) for blazing-fast free Llama 3 inference
 - [LangChain](https://langchain.com) for LLM orchestration tooling
