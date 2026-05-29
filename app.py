@@ -6,6 +6,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from html import escape
 
+from core.ats_checker import extract_jd_keywords, generate_ats_analysis
 from core.parser import parse_job_description, parse_resume
 from core.scorer import groq
 from core.prompts import prompt_template, output_parser
@@ -41,6 +42,72 @@ def format_elapsed_time(seconds: float) -> str:
     total_seconds = int(seconds)
     minutes, seconds = divmod(total_seconds, 60)
     return f"{minutes:02d}:{seconds:02d}"
+
+
+def build_scoring_chain():
+    return prompt_template | groq | output_parser
+
+
+def response_to_dict(response) -> dict:
+    if hasattr(response, "model_dump"):
+        return response.model_dump()
+    return dict(response)
+
+
+def analyse_uploaded_resumes(
+    job_description,
+    resumes: list,
+    *,
+    chain=None,
+    keyword_extractor=extract_jd_keywords,
+    ats_analyzer=generate_ats_analysis,
+    progress_callback=None,
+    progress_interval: float = 1,
+) -> list[dict]:
+    jd = parse_job_description(job_description)
+    jd_keywords = keyword_extractor(jd)
+
+    candidates: dict = {}
+    resume_files: dict[str, bytes] = {}
+
+    for resume in resumes:
+        filename: str = resume.name
+        resume_files[filename] = resume.getvalue()
+        resume.seek(0)
+        candidates[filename] = parse_resume(resume)
+
+    scoring_chain = chain or build_scoring_chain()
+    results: list = []
+    total_candidates = len(candidates)
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        for idx, (filename, candidate) in enumerate(candidates.items(), 1):
+            email: str = candidate.get("email", "candidate")
+            future = executor.submit(
+                scoring_chain.invoke,
+                input={
+                    "email": email,
+                    "job_description": jd,
+                    "resume": candidate,
+                },
+            )
+
+            if progress_callback:
+                while not future.done():
+                    progress_callback("scoring", idx, total_candidates, email)
+                    time.sleep(progress_interval)
+
+            response = future.result()
+            result = response_to_dict(response)
+            result["filename"] = filename
+            result["pdf_bytes"] = resume_files[filename]
+            result["ats_analysis"] = ats_analyzer(jd_keywords, candidate)
+            results.append(result)
+
+            if progress_callback:
+                progress_callback("completed", idx, total_candidates, email)
+
+    return results
 
 
 def render_empty_state() -> None:
@@ -130,7 +197,16 @@ def render_candidate_comparison(results: list[dict]) -> None:
                     summary = clean_response_text(
                         result.get("explanation", "No summary available.")
                     )
+                    ats_analysis = result.get("ats_analysis", {})
+                    keyword_coverage = ats_analysis.get("keyword_coverage")
+                    total_keywords = ats_analysis.get("total_keywords")
                     rating_class = get_rating_class(rating)
+                    ats_summary = ""
+                    if keyword_coverage is not None and total_keywords is not None:
+                        ats_summary = (
+                            f"<p class=\"card-summary\">ATS keyword coverage: "
+                            f"{keyword_coverage:.0%} of {total_keywords} keywords</p>"
+                        )
 
                     with st.container(border=True):
                         st.markdown(
@@ -141,6 +217,7 @@ def render_candidate_comparison(results: list[dict]) -> None:
                                 <span class="{rating_class}">Rating: {rating:.2f}</span>
                             </div>
                             <p class="card-summary">{escape(summary)}</p>
+                            {ats_summary}
                             </div>
                             """,
                             unsafe_allow_html=True,
@@ -288,67 +365,41 @@ def main():
             # parse the pdf
             start_time = time.monotonic()
             progress_status.markdown("Parsing job description and resumes...")
-            jd = parse_job_description(job_description)
 
-            # parse resume
-            candidates: dict = {}
-            resume_files: dict[str, bytes] = {}
+            def update_progress(
+                state: str, idx: int, total_candidates: int, email: str
+            ) -> None:
+                elapsed = format_elapsed_time(time.monotonic() - start_time)
 
-            for resume in resumes:
-                filename: str = resume.name
-                resume_files[filename] = resume.getvalue()
-                resume.seek(0)
-                candidate = parse_resume(resume)
-                candidates[filename] = candidate
-
-            # score the resume against job description
-            chain = prompt_template | groq | output_parser
-            results: list = []
-            total_candidates = len(candidates)
-
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                for idx, (filename, candidate) in enumerate(candidates.items(), 1):
-                    email: str = candidate.get("email", "candidate")
-                    future = executor.submit(
-                        chain.invoke,
-                        input={
-                            "email": email,
-                            "job_description": jd,
-                            "resume": candidate,
-                        },
-                    )
-
-                    while not future.done():
-                        elapsed = format_elapsed_time(time.monotonic() - start_time)
-                        progress_bar.progress(
-                            (idx - 1) / total_candidates,
-                            text=(
-                                f"Resume is being scored... {idx}/{total_candidates} "
-                                f"| Time taken: {elapsed}"
-                            ),
-                        )
-                        progress_status.markdown(
-                            f"Scoring **{email}**. Time taken: `{elapsed}`"
-                        )
-                        time.sleep(1)
-
-                    response = future.result()
-                    result = response.model_dump()
-                    result["filename"] = filename
-                    result["pdf_bytes"] = resume_files[filename]
-                    results.append(result)
-
-                    elapsed = format_elapsed_time(time.monotonic() - start_time)
+                if state == "scoring":
                     progress_bar.progress(
-                        idx / total_candidates,
+                        (idx - 1) / total_candidates,
                         text=(
-                            f"Resume scoring complete... {idx}/{total_candidates} "
+                            f"Resume is being scored... {idx}/{total_candidates} "
                             f"| Time taken: {elapsed}"
                         ),
                     )
                     progress_status.markdown(
-                        f"Completed **{email}**. Time taken: `{elapsed}`"
+                        f"Scoring **{email}**. Time taken: `{elapsed}`"
                     )
+                    return
+
+                progress_bar.progress(
+                    idx / total_candidates,
+                    text=(
+                        f"Resume scoring complete... {idx}/{total_candidates} "
+                        f"| Time taken: {elapsed}"
+                    ),
+                )
+                progress_status.markdown(
+                    f"Completed **{email}**. Time taken: `{elapsed}`"
+                )
+
+            results = analyse_uploaded_resumes(
+                job_description,
+                resumes,
+                progress_callback=update_progress,
+            )
 
             progress_status.empty()
 

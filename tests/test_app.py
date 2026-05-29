@@ -1,4 +1,5 @@
 import sys
+import time
 from os import path
 from types import SimpleNamespace
 
@@ -37,6 +38,35 @@ class FakePlaceholder:
 
     def empty(self):
         return None
+
+
+class FakeUpload:
+    def __init__(self, name):
+        self.name = name
+        self.seek_calls = []
+
+    def getvalue(self):
+        return f"pdf-bytes-{self.name}".encode()
+
+    def seek(self, position):
+        self.seek_calls.append(position)
+
+
+class FakeChain:
+    def __init__(self, calls=None, delay=0):
+        self.calls = calls if calls is not None else []
+        self.delay = delay
+
+    def invoke(self, input):
+        if self.delay:
+            time.sleep(self.delay)
+
+        self.calls.append(input)
+        return {
+            "email": input["email"],
+            "rating": 0.7,
+            "explanation": "Deterministic test response",
+        }
 
 
 class FakeStreamlit:
@@ -153,3 +183,172 @@ def test_main_submit_requires_resume(app_module, monkeypatch):
         ":red[No resume. Please upload it before submitting.]",
         "🤦",
     ) in fake_st.toasts
+
+
+def test_jd_parsed_once_for_multiple_resumes(app_module, monkeypatch):
+    parse_jd_calls = []
+    parse_resume_calls = []
+    keyword_calls = []
+
+    def fake_parse_job_description(file):
+        parse_jd_calls.append(file.name)
+        return {"required_skills": "Python, SQL"}
+
+    def fake_parse_resume(file):
+        parse_resume_calls.append(file.name)
+        return {"email": f"{file.name}@example.com", "skills": "Python"}
+
+    def fake_keyword_extractor(jd):
+        keyword_calls.append(jd)
+        return ["python", "sql"]
+
+    monkeypatch.setattr(app_module, "parse_job_description", fake_parse_job_description)
+    monkeypatch.setattr(app_module, "parse_resume", fake_parse_resume)
+
+    resumes = [FakeUpload("candidate-1.pdf"), FakeUpload("candidate-2.pdf")]
+
+    app_module.analyse_uploaded_resumes(
+        FakeUpload("job-description.pdf"),
+        resumes,
+        chain=FakeChain(),
+        keyword_extractor=fake_keyword_extractor,
+        ats_analyzer=lambda keywords, resume: {},
+    )
+
+    assert parse_jd_calls == ["job-description.pdf"]
+    assert parse_resume_calls == ["candidate-1.pdf", "candidate-2.pdf"]
+    assert len(keyword_calls) == 1
+
+
+def test_resume_scoring_invoked_once_per_candidate(app_module, monkeypatch):
+    chain_calls = []
+
+    monkeypatch.setattr(
+        app_module,
+        "parse_job_description",
+        lambda file: {"required_skills": "Python, SQL"},
+    )
+    monkeypatch.setattr(
+        app_module,
+        "parse_resume",
+        lambda file: {"email": f"{file.name}@example.com", "skills": "Python"},
+    )
+
+    resumes = [
+        FakeUpload("candidate-1.pdf"),
+        FakeUpload("candidate-2.pdf"),
+        FakeUpload("candidate-3.pdf"),
+    ]
+
+    app_module.analyse_uploaded_resumes(
+        FakeUpload("job-description.pdf"),
+        resumes,
+        chain=FakeChain(chain_calls),
+        keyword_extractor=lambda jd: ["python", "sql"],
+        ats_analyzer=lambda keywords, resume: {},
+    )
+
+    assert len(chain_calls) == len(resumes)
+    assert [call["email"] for call in chain_calls] == [
+        "candidate-1.pdf@example.com",
+        "candidate-2.pdf@example.com",
+        "candidate-3.pdf@example.com",
+    ]
+
+
+def test_ats_analysis_invoked_once_per_candidate(app_module, monkeypatch):
+    ats_calls = []
+
+    monkeypatch.setattr(
+        app_module,
+        "parse_job_description",
+        lambda file: {"required_skills": "Python, SQL"},
+    )
+    monkeypatch.setattr(
+        app_module,
+        "parse_resume",
+        lambda file: {"email": f"{file.name}@example.com", "skills": "Python"},
+    )
+
+    def fake_ats_analyzer(keywords, resume):
+        ats_calls.append((keywords, resume))
+        return {"present_keywords": ["python"], "missing_keywords": ["sql"]}
+
+    resumes = [FakeUpload("candidate-1.pdf"), FakeUpload("candidate-2.pdf")]
+
+    app_module.analyse_uploaded_resumes(
+        FakeUpload("job-description.pdf"),
+        resumes,
+        chain=FakeChain(),
+        keyword_extractor=lambda jd: ["python", "sql"],
+        ats_analyzer=fake_ats_analyzer,
+    )
+
+    assert len(ats_calls) == len(resumes)
+    assert all(call[0] == ["python", "sql"] for call in ats_calls)
+
+
+def test_every_candidate_result_contains_ats_analysis(app_module, monkeypatch):
+    monkeypatch.setattr(
+        app_module,
+        "parse_job_description",
+        lambda file: {"required_skills": "Python, SQL"},
+    )
+    monkeypatch.setattr(
+        app_module,
+        "parse_resume",
+        lambda file: {"email": f"{file.name}@example.com", "skills": "Python"},
+    )
+
+    resumes = [FakeUpload("candidate-1.pdf"), FakeUpload("candidate-2.pdf")]
+    expected_ats = {
+        "present_keywords": ["python"],
+        "partial_keywords": [],
+        "missing_keywords": ["sql"],
+        "keyword_coverage": 0.5,
+        "total_keywords": 2,
+    }
+
+    results = app_module.analyse_uploaded_resumes(
+        FakeUpload("job-description.pdf"),
+        resumes,
+        chain=FakeChain(),
+        keyword_extractor=lambda jd: ["python", "sql"],
+        ats_analyzer=lambda keywords, resume: expected_ats,
+    )
+
+    assert len(results) == len(resumes)
+    assert all(result["ats_analysis"] == expected_ats for result in results)
+
+
+def test_processing_time_scales_linearly_with_candidate_count(app_module, monkeypatch):
+    monkeypatch.setattr(
+        app_module,
+        "parse_job_description",
+        lambda file: {"required_skills": "Python"},
+    )
+    monkeypatch.setattr(
+        app_module,
+        "parse_resume",
+        lambda file: {"email": f"{file.name}@example.com", "skills": "Python"},
+    )
+
+    def run_candidate_batch(candidate_count):
+        resumes = [
+            FakeUpload(f"candidate-{idx}.pdf") for idx in range(candidate_count)
+        ]
+        start = time.perf_counter()
+        app_module.analyse_uploaded_resumes(
+            FakeUpload("job-description.pdf"),
+            resumes,
+            chain=FakeChain(delay=0.02),
+            keyword_extractor=lambda jd: ["python"],
+            ats_analyzer=lambda keywords, resume: {},
+        )
+        return time.perf_counter() - start
+
+    five_candidate_time = run_candidate_batch(5)
+    ten_candidate_time = run_candidate_batch(10)
+    ratio = ten_candidate_time / five_candidate_time
+
+    assert 1.5 <= ratio <= 2.5
