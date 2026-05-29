@@ -1,6 +1,8 @@
 import streamlit as st
 import os
 
+from core.parser import parse_job_description, parse_resume
+
 
 def handle_upload() -> None:
     """Function to increment or decrement resume_count on file upload or removal"""
@@ -41,11 +43,11 @@ def main():
 
             if extension != ".pdf":
                 st.toast(
-                    f"You have uploaded a {extension} file! Please upload a .pdf file.",
+                    f":red[You have uploaded a {extension} file! Please upload a .pdf file.]",
                     icon="🚨",
                 )
             else:
-                st.toast(f"Job description uploaded successfully!", icon="😊")
+                st.toast(f":green[Job description uploaded successfully!]", icon="😊")
 
     with input_col:
         st.header("Candidate Resumes")
@@ -61,11 +63,11 @@ def main():
             extension: str = os.path.splitext(resume.name)[1].lower()
             if extension != ".pdf":
                 st.toast(
-                    f"You have uploaded a {extension} file! Please upload a .pdf file.",
+                    f":red[You have uploaded a {extension} file! Please upload a .pdf file.]",
                     icon="🚨",
                 )
             else:
-                st.toast(f"Resume uploaded successfully!", icon="😊")
+                st.toast(f":green[Resume uploaded successfully!]", icon="😊")
 
         st.write("#### Number of resumes:", st.session_state.get("resume_count", 0))
 
@@ -73,13 +75,30 @@ def main():
     submit_btn = st.button(label="Submit")
 
     if submit_btn:
-        if job_description:
-            st.write(job_description.name)
-        if resumes:
-            for resume in resumes:
-                st.write(resume.name)
+        if not job_description and not resumes:
+            raise Exception(
+                "No job description or resume. Please upload them before submitting."
+            )
+        if not job_description:
+            raise Exception("No job description. Please upload it before submitting.")
+        if not resumes:
+            raise Exception("No resume. Please upload it before submitting.")
+
+        # parse the pdf
+        jd = parse_job_description(job_description)
+
+        # parse resume
+        candidates: dict = {}
+
+        for resume in resumes:
+            filename: str = resume.name
+            candidate = parse_resume(resume)
+            candidates[filename] = candidate
 
 
 if __name__ == "__main__":
-    st.session_state.setdefault("resume_count", 0)
-    main()
+    try:
+        st.session_state.setdefault("resume_count", 0)
+        main()
+    except Exception as e:
+        st.toast(f":red[{e}]", icon="🤦")
