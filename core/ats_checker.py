@@ -103,16 +103,19 @@ def generate_ats_analysis(
         len(present_keywords) + len(partial_keywords) + len(missing_keywords)
     )
     coverage = 0.0
+    exact_coverage = 0.0
     if total_keywords:
         coverage = round(
             (len(present_keywords) + 0.5 * len(partial_keywords)) / total_keywords,
             2,
         )
+        exact_coverage = round(len(present_keywords) / total_keywords, 2)
 
     return {
         "present_keywords": present_keywords,
         "partial_keywords": partial_keywords,
         "missing_keywords": missing_keywords,
         "keyword_coverage": coverage,
+        "exact_keyword_coverage": exact_coverage,
         "total_keywords": total_keywords,
     }

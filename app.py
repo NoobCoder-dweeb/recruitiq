@@ -1,10 +1,15 @@
 import streamlit as st
 import base64
+import io
 import os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from html import escape
+
+import pdfplumber
+import pypdfium2 as pdfium
+from PIL import ImageDraw
 
 from core.ats_checker import extract_jd_keywords, generate_ats_analysis
 from core.parser import parse_job_description, parse_resume
@@ -52,6 +57,133 @@ def response_to_dict(response) -> dict:
     if hasattr(response, "model_dump"):
         return response.model_dump()
     return dict(response)
+
+
+def keyword_tokens(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9+#.]+", str(text).lower())
+
+
+def find_keyword_boxes(words: list[dict], keywords: list[str]) -> list[dict[str, float]]:
+    token_stream: list[tuple[str, int]] = []
+
+    for word_idx, word in enumerate(words):
+        for token in keyword_tokens(word.get("text", "")):
+            token_stream.append((token, word_idx))
+
+    boxes: list[dict[str, float]] = []
+    seen_boxes: set[tuple[float, float, float, float]] = set()
+
+    for keyword in sorted(keywords, key=lambda item: len(str(item)), reverse=True):
+        tokens = keyword_tokens(keyword)
+        if not tokens:
+            continue
+
+        token_count = len(tokens)
+        for idx in range(0, len(token_stream) - token_count + 1):
+            candidate_tokens = [
+                token for token, _ in token_stream[idx : idx + token_count]
+            ]
+            if candidate_tokens != tokens:
+                continue
+
+            word_indexes = {
+                word_idx for _, word_idx in token_stream[idx : idx + token_count]
+            }
+            matched_words = [words[word_idx] for word_idx in sorted(word_indexes)]
+            x0 = min(word["x0"] for word in matched_words)
+            x1 = max(word["x1"] for word in matched_words)
+            top = min(word["top"] for word in matched_words)
+            bottom = max(word["bottom"] for word in matched_words)
+            box_key = (round(x0, 1), round(top, 1), round(x1, 1), round(bottom, 1))
+
+            if box_key in seen_boxes:
+                continue
+
+            boxes.append({"x0": x0, "x1": x1, "top": top, "bottom": bottom})
+            seen_boxes.add(box_key)
+
+    return boxes
+
+
+def render_ats_summary_html(ats_analysis: dict) -> str:
+    keyword_coverage = ats_analysis.get("keyword_coverage")
+    total_keywords = ats_analysis.get("total_keywords")
+
+    if keyword_coverage is None or total_keywords is None:
+        return ""
+
+    present_keywords = ats_analysis.get("present_keywords", [])
+    partial_keywords = ats_analysis.get("partial_keywords", [])
+    exact_keyword_chips = "".join(
+        f'<span class="ats-keyword-chip">{escape(str(keyword))}</span>'
+        for keyword in present_keywords
+    )
+    partial_keyword_chips = "".join(
+        f'<span class="ats-keyword-chip ats-keyword-chip-partial">{escape(str(keyword))}</span>'
+        for keyword in partial_keywords
+    )
+
+    if not exact_keyword_chips and not partial_keyword_chips:
+        keyword_chips = '<span class="ats-empty-keywords">No keyword matches</span>'
+    else:
+        keyword_chips = exact_keyword_chips + partial_keyword_chips
+
+    return (
+        '<section class="ats-summary-box">'
+        '<div class="ats-score-row">'
+        '<span class="ats-score-label">ATS match</span>'
+        f'<span class="ats-score-value">{keyword_coverage:.0%}</span>'
+        "</div>"
+        '<div class="ats-meter">'
+        f'<div class="ats-meter-fill" style="width: {keyword_coverage:.0%};"></div>'
+        "</div>"
+        f'<div class="ats-keyword-count">{len(present_keywords)} exact, {len(partial_keywords)} partial of {total_keywords} JD keywords</div>'
+        f'<div class="ats-keyword-grid">{keyword_chips}</div>'
+        "</section>"
+    )
+
+
+def render_pdf_page_image(pdf_document, page_index: int, scale: float = 1.4):
+    page = pdf_document[page_index]
+    bitmap = page.render(scale=scale)
+    return bitmap.to_pil()
+
+
+def draw_keyword_boxes(image, page, boxes: list[dict[str, float]]) -> None:
+    draw = ImageDraw.Draw(image, "RGBA")
+    scale_x = image.width / page.width
+    scale_y = image.height / page.height
+
+    for box in boxes:
+        rectangle = (
+            box["x0"] * scale_x,
+            box["top"] * scale_y,
+            box["x1"] * scale_x,
+            box["bottom"] * scale_y,
+        )
+        draw.rectangle(
+            rectangle,
+            fill=(20, 184, 166, 70),
+            outline=(15, 118, 110, 255),
+            width=4,
+        )
+
+
+def build_annotated_pdf_page_images(
+    pdf_bytes: bytes, matched_keywords: list[str]
+) -> list:
+    pdf_document = pdfium.PdfDocument(pdf_bytes)
+    images = []
+
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        for page_index, page in enumerate(pdf.pages):
+            image = render_pdf_page_image(pdf_document, page_index)
+            words = page.extract_words() if matched_keywords else []
+            boxes = find_keyword_boxes(words, matched_keywords)
+            draw_keyword_boxes(image, page, boxes)
+            images.append(image)
+
+    return images
 
 
 def analyse_uploaded_resumes(
@@ -121,20 +253,38 @@ def render_empty_state() -> None:
     )
 
 
-def render_pdf_preview(pdf_bytes: bytes, filename: str) -> None:
+def render_pdf_preview(
+    pdf_bytes: bytes,
+    filename: str,
+    *,
+    matched_keywords: list[str] | None = None,
+) -> None:
     encoded_pdf = base64.b64encode(pdf_bytes).decode("utf-8")
     st.markdown(f"#### {escape(filename)}")
-    st.markdown(
-        f"""
-        <iframe
-            src="data:application/pdf;base64,{encoded_pdf}"
-            width="100%"
-            height="720"
-            style="border: 1px solid #e2e8f0; border-radius: 8px;"
-        ></iframe>
-        """,
-        unsafe_allow_html=True,
-    )
+
+    try:
+        page_images = build_annotated_pdf_page_images(
+            pdf_bytes, matched_keywords or []
+        )
+        with st.container(height=720, border=True):
+            for page_index, image in enumerate(page_images, 1):
+                st.image(
+                    image,
+                    caption=f"Page {page_index}",
+                    use_container_width=True,
+                )
+    except Exception:
+        st.markdown(
+            f"""
+            <iframe
+                src="data:application/pdf;base64,{encoded_pdf}"
+                width="100%"
+                height="720"
+                style="border: 1px solid #e2e8f0; border-radius: 8px;"
+            ></iframe>
+            """,
+            unsafe_allow_html=True,
+        )
 
 
 def render_candidate_comparison(results: list[dict]) -> None:
@@ -172,6 +322,78 @@ def render_candidate_comparison(results: list[dict]) -> None:
             line-height: 1.6;
             margin: 0;
         }
+        .ats-summary-box {
+            border: 1px solid #94a3b8;
+            border-radius: 8px;
+            padding: 12px;
+            margin-top: 14px;
+            background: #f8fafc;
+        }
+        .ats-score-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            gap: 12px;
+            margin-bottom: 8px;
+        }
+        .ats-score-label {
+            color: #334155;
+            font-size: 0.84rem;
+            font-weight: 700;
+            text-transform: uppercase;
+        }
+        .ats-score-value {
+            color: #0f766e;
+            font-size: 1.8rem;
+            font-weight: 800;
+            line-height: 1;
+        }
+        .ats-meter {
+            height: 8px;
+            overflow: hidden;
+            border-radius: 999px;
+            background: #cbd5e1;
+            margin-bottom: 8px;
+        }
+        .ats-meter-fill {
+            height: 100%;
+            border-radius: 999px;
+            background: #0f766e;
+        }
+        .ats-keyword-count {
+            color: #475569;
+            font-size: 0.88rem;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+        .ats-keyword-grid {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+        .ats-keyword-chip {
+            border: 1px solid #0f766e;
+            border-radius: 6px;
+            color: #0f766e;
+            background: #ecfdf5;
+            padding: 4px 8px;
+            font-size: 0.82rem;
+            font-weight: 700;
+        }
+        .ats-keyword-chip-partial {
+            border-style: dashed;
+            color: #0369a1;
+            background: #eff6ff;
+        }
+        .ats-empty-keywords {
+            border: 1px solid #cbd5e1;
+            border-radius: 6px;
+            color: #64748b;
+            background: #ffffff;
+            padding: 4px 8px;
+            font-size: 0.82rem;
+            font-weight: 600;
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -198,15 +420,8 @@ def render_candidate_comparison(results: list[dict]) -> None:
                         result.get("explanation", "No summary available.")
                     )
                     ats_analysis = result.get("ats_analysis", {})
-                    keyword_coverage = ats_analysis.get("keyword_coverage")
-                    total_keywords = ats_analysis.get("total_keywords")
                     rating_class = get_rating_class(rating)
-                    ats_summary = ""
-                    if keyword_coverage is not None and total_keywords is not None:
-                        ats_summary = (
-                            f"<p class=\"card-summary\">ATS keyword coverage: "
-                            f"{keyword_coverage:.0%} of {total_keywords} keywords</p>"
-                        )
+                    ats_summary = render_ats_summary_html(ats_analysis)
 
                     with st.container(border=True):
                         st.markdown(
@@ -217,11 +432,12 @@ def render_candidate_comparison(results: list[dict]) -> None:
                                 <span class="{rating_class}">Rating: {rating:.2f}</span>
                             </div>
                             <p class="card-summary">{escape(summary)}</p>
-                            {ats_summary}
                             </div>
                             """,
                             unsafe_allow_html=True,
                         )
+                        if ats_summary:
+                            st.markdown(ats_summary, unsafe_allow_html=True)
                         preview_col, download_col = st.columns(2)
 
                         with preview_col:
@@ -251,6 +467,9 @@ def render_candidate_comparison(results: list[dict]) -> None:
         render_pdf_preview(
             selected_result.get("pdf_bytes", b""),
             selected_result.get("filename", "resume.pdf"),
+            matched_keywords=selected_result.get("ats_analysis", {}).get(
+                "present_keywords", []
+            ),
         )
 
 
@@ -316,14 +535,16 @@ def main():
 
     # bottom row to display list of candidates
     response_placeholder = st.empty()
-    saved_results = st.session_state.get("scoring_results", [])
 
-    if saved_results:
-        with response_placeholder.container():
-            render_candidate_comparison(saved_results)
-    else:
-        with response_placeholder.container(border=True):
-            render_empty_state()
+    def render_saved_results_or_empty() -> None:
+        saved_results = st.session_state.get("scoring_results", [])
+
+        if saved_results:
+            with response_placeholder.container():
+                render_candidate_comparison(saved_results)
+        else:
+            with response_placeholder.container(border=True):
+                render_empty_state()
 
     if submit_btn:
         if not job_description and not resumes:
@@ -331,18 +552,22 @@ def main():
                 ":red[No job description or resume. Please upload them before submitting.]",
                 icon="🤦",
             )
+            render_saved_results_or_empty()
             return
         if not job_description:
             st.toast(
                 ":red[No job description. Please upload it before submitting.]",
                 icon="🤦",
             )
+            render_saved_results_or_empty()
             return
         if not resumes:
             st.toast(":red[No resume. Please upload it before submitting.]", icon="🤦")
+            render_saved_results_or_empty()
             return
         if len(resumes) != len(list(set(resumes))):
             st.toast(":red[Cannot upload duplicates. Please retry again.]", icon="🤦")
+            render_saved_results_or_empty()
             return
 
         response_placeholder.empty()
@@ -412,6 +637,8 @@ def main():
         response_placeholder.empty()
         with response_placeholder.container():
             render_candidate_comparison(results)
+    else:
+        render_saved_results_or_empty()
 
 
 if __name__ == "__main__":

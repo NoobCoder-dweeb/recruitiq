@@ -170,6 +170,42 @@ def test_format_elapsed_time(app_module):
     assert app_module.format_elapsed_time(65.9) == "01:05"
 
 
+def test_render_ats_summary_html_highlights_score_and_keywords(app_module):
+    html = app_module.render_ats_summary_html(
+        {
+            "present_keywords": ["Python", "SQL & BI", "<script>"],
+            "partial_keywords": ["model training"],
+            "keyword_coverage": 0.75,
+            "total_keywords": 4,
+        }
+    )
+
+    assert "ATS match" in html
+    assert "75%" in html
+    assert "3 exact, 1 partial of 4 JD keywords" in html
+    assert "Python" in html
+    assert "SQL &amp; BI" in html
+    assert "model training" in html
+    assert "&lt;script&gt;" in html
+    assert "<script>" not in html
+
+
+def test_find_keyword_boxes_locates_single_and_multi_word_matches(app_module):
+    words = [
+        {"text": "Built", "x0": 0, "x1": 20, "top": 0, "bottom": 10},
+        {"text": "Python", "x0": 25, "x1": 60, "top": 0, "bottom": 10},
+        {"text": "SQL", "x0": 65, "x1": 90, "top": 0, "bottom": 10},
+        {"text": "BI", "x0": 95, "x1": 110, "top": 0, "bottom": 10},
+    ]
+
+    boxes = app_module.find_keyword_boxes(words, ["Python", "SQL BI"])
+
+    assert boxes == [
+        {"x0": 25, "x1": 60, "top": 0, "bottom": 10},
+        {"x0": 65, "x1": 110, "top": 0, "bottom": 10},
+    ]
+
+
 def test_main_submit_requires_resume(app_module, monkeypatch):
     fake_st = FakeStreamlit(
         job_description=SimpleNamespace(name="job-description.pdf"),
