@@ -271,7 +271,7 @@ def render_pdf_preview(
                 st.image(
                     image,
                     caption=f"Page {page_index}",
-                    use_container_width=True,
+                    width="stretch",
                 )
     except Exception:
         st.markdown(
@@ -444,7 +444,7 @@ def render_candidate_comparison(results: list[dict]) -> None:
                             if st.button(
                                 "View PDF",
                                 key=f"view-{idx}-{filename}",
-                                use_container_width=True,
+                                width="stretch",
                             ):
                                 st.session_state.selected_resume_filename = filename
                                 selected_filename = filename
@@ -456,7 +456,7 @@ def render_candidate_comparison(results: list[dict]) -> None:
                                 file_name=filename,
                                 mime="application/pdf",
                                 key=f"download-{idx}-{filename}",
-                                use_container_width=True,
+                                width="stretch",
                             )
 
     selected_result = next(
@@ -531,7 +531,7 @@ def main():
     # Submit button
     _, submit_col, _ = st.columns([2, 1, 2])
     with submit_col:
-        submit_btn = st.button(label="Submit", use_container_width=True)
+        submit_btn = st.button(label="Submit", width="stretch")
 
     # bottom row to display list of candidates
     response_placeholder = st.empty()
