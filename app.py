@@ -1,4 +1,5 @@
 import streamlit as st
+import base64
 import os
 import re
 import time
@@ -40,6 +41,140 @@ def format_elapsed_time(seconds: float) -> str:
     total_seconds = int(seconds)
     minutes, seconds = divmod(total_seconds, 60)
     return f"{minutes:02d}:{seconds:02d}"
+
+
+def render_empty_state() -> None:
+    st.markdown(
+        """
+        <div style="text-align: center; padding: 56px 24px;">
+            <h2 style="margin: 0;">Submit Document First</h2>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_pdf_preview(pdf_bytes: bytes, filename: str) -> None:
+    encoded_pdf = base64.b64encode(pdf_bytes).decode("utf-8")
+    st.markdown(f"#### {escape(filename)}")
+    st.markdown(
+        f"""
+        <iframe
+            src="data:application/pdf;base64,{encoded_pdf}"
+            width="100%"
+            height="720"
+            style="border: 1px solid #e2e8f0; border-radius: 8px;"
+        ></iframe>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_candidate_comparison(results: list[dict]) -> None:
+    st.markdown(
+        """
+        <style>
+        .candidate-card-content {
+            padding: 14px 10px;
+        }
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+        .card-header h4 {
+            margin: 0;
+            font-size: 1.05rem;
+        }
+        .rating-high {
+            color: #15803d;
+            font-weight: 700;
+        }
+        .rating-low {
+            color: #dc2626;
+            font-weight: 700;
+        }
+        .rating-neutral {
+            color: #334155;
+            font-weight: 700;
+        }
+        .card-summary {
+            color: #334155;
+            line-height: 1.6;
+            margin: 0;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    selected_filename = st.session_state.get("selected_resume_filename")
+    available_filenames = [result.get("filename") for result in results]
+
+    if selected_filename not in available_filenames:
+        selected_filename = available_filenames[0]
+        st.session_state.selected_resume_filename = selected_filename
+
+    responses_col, pdf_col = st.columns([1, 1.2])
+
+    with responses_col:
+        with st.expander("Candidate Rankings", expanded=True):
+            with st.container(height=720, border=False):
+                for idx, result in enumerate(results, 1):
+                    rating = result.get("rating", 0)
+                    email = result.get("email", "N/A")
+                    filename = result.get("filename", f"resume-{idx}.pdf")
+                    pdf_bytes = result.get("pdf_bytes", b"")
+                    summary = clean_response_text(
+                        result.get("explanation", "No summary available.")
+                    )
+                    rating_class = get_rating_class(rating)
+
+                    with st.container(border=True):
+                        st.markdown(
+                            f"""
+                            <div class="candidate-card-content">
+                            <div class="card-header">
+                                <h3>{escape(email)}</h3>
+                                <span class="{rating_class}">Rating: {rating:.2f}</span>
+                            </div>
+                            <p class="card-summary">{escape(summary)}</p>
+                            </div>
+                            """,
+                            unsafe_allow_html=True,
+                        )
+                        preview_col, download_col = st.columns(2)
+
+                        with preview_col:
+                            if st.button(
+                                "View PDF",
+                                key=f"view-{idx}-{filename}",
+                                use_container_width=True,
+                            ):
+                                st.session_state.selected_resume_filename = filename
+                                selected_filename = filename
+
+                        with download_col:
+                            st.download_button(
+                                "Download PDF",
+                                data=pdf_bytes,
+                                file_name=filename,
+                                mime="application/pdf",
+                                key=f"download-{idx}-{filename}",
+                                use_container_width=True,
+                            )
+
+    selected_result = next(
+        result for result in results if result.get("filename") == selected_filename
+    )
+
+    with pdf_col:
+        render_pdf_preview(
+            selected_result.get("pdf_bytes", b""),
+            selected_result.get("filename", "resume.pdf"),
+        )
 
 
 def main():
@@ -104,15 +239,14 @@ def main():
 
     # bottom row to display list of candidates
     response_placeholder = st.empty()
-    with response_placeholder.container(border=True):
-        st.markdown(
-            """
-            <div style="text-align: center; padding: 56px 24px;">
-                <h2 style="margin: 0;">Submit Document First</h2>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+    saved_results = st.session_state.get("scoring_results", [])
+
+    if saved_results:
+        with response_placeholder.container():
+            render_candidate_comparison(saved_results)
+    else:
+        with response_placeholder.container(border=True):
+            render_empty_state()
 
     if submit_btn:
         if not job_description and not resumes:
@@ -158,9 +292,12 @@ def main():
 
             # parse resume
             candidates: dict = {}
+            resume_files: dict[str, bytes] = {}
 
             for resume in resumes:
                 filename: str = resume.name
+                resume_files[filename] = resume.getvalue()
+                resume.seek(0)
                 candidate = parse_resume(resume)
                 candidates[filename] = candidate
 
@@ -170,7 +307,7 @@ def main():
             total_candidates = len(candidates)
 
             with ThreadPoolExecutor(max_workers=1) as executor:
-                for idx, (_, candidate) in enumerate(candidates.items(), 1):
+                for idx, (filename, candidate) in enumerate(candidates.items(), 1):
                     email: str = candidate.get("email", "candidate")
                     future = executor.submit(
                         chain.invoke,
@@ -196,7 +333,10 @@ def main():
                         time.sleep(1)
 
                     response = future.result()
-                    results.append(response.model_dump())
+                    result = response.model_dump()
+                    result["filename"] = filename
+                    result["pdf_bytes"] = resume_files[filename]
+                    results.append(result)
 
                     elapsed = format_elapsed_time(time.monotonic() - start_time)
                     progress_bar.progress(
@@ -214,72 +354,13 @@ def main():
 
         # sort the results by descending rating
         results = sorted(results, key=lambda item: item.get("rating", 0), reverse=True)
+        st.session_state.scoring_results = results
+        st.session_state.selected_resume_filename = results[0].get("filename")
 
-        # display responses as expandable, scrollable ordered cards
+        # display responses as side-by-side cards and PDF preview
         response_placeholder.empty()
         with response_placeholder.container():
-            st.markdown(
-                """
-                <style>
-                .candidate-card-content {
-                    padding: 14px 10px;
-                }
-                .card-header {
-                    display: flex;
-                    justify-content: space-between;
-                    align-items: center;
-                    gap: 12px;
-                    margin-bottom: 12px;
-                }
-                .card-header h4 {
-                    margin: 0;
-                    font-size: 1.05rem;
-                }
-                .rating-high {
-                    color: #15803d;
-                    font-weight: 700;
-                }
-                .rating-low {
-                    color: #dc2626;
-                    font-weight: 700;
-                }
-                .rating-neutral {
-                    color: #334155;
-                    font-weight: 700;
-                }
-                .card-summary {
-                    color: #334155;
-                    line-height: 1.6;
-                    margin: 0;
-                }
-                </style>
-                """,
-                unsafe_allow_html=True,
-            )
-
-            with st.expander("Candidate Rankings", expanded=True):
-                with st.container(height=680, border=False):
-                    for result in results:
-                        rating = result.get("rating", 0)
-                        email = result.get("email", "N/A")
-                        summary = clean_response_text(
-                            result.get("explanation", "No summary available.")
-                        )
-                        rating_class = get_rating_class(rating)
-
-                        with st.container(border=True):
-                            st.markdown(
-                                f"""
-                                <div class="candidate-card-content">
-                                <div class="card-header">
-                                    <h3>{escape(email)}</h3>
-                                    <span class="{rating_class}">Rating: {rating:.2f}</span>
-                                </div>
-                                <p class="card-summary">{escape(summary)}</p>
-                                </div>
-                                """,
-                                unsafe_allow_html=True,
-                            )
+            render_candidate_comparison(results)
 
 
 if __name__ == "__main__":
