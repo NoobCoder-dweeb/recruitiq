@@ -31,6 +31,14 @@ class FakeColumn:
         return False
 
 
+class FakePlaceholder:
+    def container(self, **kwargs):
+        return FakeColumn()
+
+    def empty(self):
+        return None
+
+
 class FakeStreamlit:
     def __init__(self, *, job_description=None, resumes=None, submit=False):
         self.job_description = job_description
@@ -41,6 +49,7 @@ class FakeStreamlit:
         self.titles = []
         self.headers = []
         self.writes = []
+        self.markdowns = []
         self.toasts = []
         self.uploaders = []
         self.buttons = []
@@ -54,8 +63,15 @@ class FakeStreamlit:
     def write(self, *args):
         self.writes.append(args)
 
+    def markdown(self, *args, **kwargs):
+        self.markdowns.append((args, kwargs))
+
+    def empty(self):
+        return FakePlaceholder()
+
     def columns(self, count):
-        return [FakeColumn() for _ in range(count)]
+        column_count = len(count) if isinstance(count, list) else count
+        return [FakeColumn() for _ in range(column_count)]
 
     def header(self, text):
         self.headers.append(text)
@@ -80,7 +96,7 @@ class FakeStreamlit:
     def toast(self, message, icon=None):
         self.toasts.append((message, icon))
 
-    def button(self, label):
+    def button(self, label, **kwargs):
         self.buttons.append(label)
         return self.submit
 
@@ -102,6 +118,26 @@ def test_handle_upload_counts_uploaded_resumes(app_module, monkeypatch):
     app_module.handle_upload()
 
     assert fake_st.session_state.resume_count == 3
+
+
+def test_clean_response_text_removes_asterisk_bullets(app_module):
+    text = "* Strong Python match\n* Relevant SQL experience"
+
+    assert (
+        app_module.clean_response_text(text)
+        == "Strong Python match\nRelevant SQL experience"
+    )
+
+
+def test_get_rating_class(app_module):
+    assert app_module.get_rating_class(0.81) == "rating-high"
+    assert app_module.get_rating_class(0.5) == "rating-neutral"
+    assert app_module.get_rating_class(0.49) == "rating-low"
+
+
+def test_format_elapsed_time(app_module):
+    assert app_module.format_elapsed_time(0) == "00:00"
+    assert app_module.format_elapsed_time(65.9) == "01:05"
 
 
 def test_main_submit_requires_resume(app_module, monkeypatch):
