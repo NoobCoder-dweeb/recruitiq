@@ -2,6 +2,8 @@ import streamlit as st
 import os
 
 from core.parser import parse_job_description, parse_resume
+from core.scorer import groq
+from core.prompts import prompt_template, output_parser
 
 
 def handle_upload() -> None:
@@ -95,6 +97,25 @@ def main():
             candidate = parse_resume(resume)
             candidates[filename] = candidate
 
+        # score the resume against job description
+        chain = prompt_template | groq | output_parser
+        results: list = []
+
+        for _, candidate in candidates.items():
+            email: str = candidate.get("email", "")
+            response = chain.invoke(
+                input={
+                    "email": email,
+                    "job_description": jd,
+                    "resume": candidate,
+                }
+            )
+
+            results.append(response.model_dump())
+
+        # sort the results by descending rating
+        st.write(results) 
+        
 
 if __name__ == "__main__":
     try:
